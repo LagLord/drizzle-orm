@@ -170,7 +170,36 @@ export class PgDialect {
 		}));
 	}
 
-	buildUpdateQuery({ table, set, where, returning, withList, from, joins }: PgUpdateConfig): SQL {
+	buildUpdateSetUnnest(table: PgTable, set: UpdateSet): SQL {
+		const tableColumns = table[Table.Symbol.Columns];
+
+		const columnNames = Object.keys(tableColumns).filter((colName) => set[colName] !== undefined);
+
+		const setSize = columnNames.length;
+		const setChunks: SQL<unknown>[] = new Array(setSize);
+		const unnestChunks: SQL<unknown>[] = new Array(setSize);
+
+		columnNames.forEach((colName, i) => {
+			const col = tableColumns[colName]!;
+
+			const key = sql.identifier(this.casing.getColumnCasing(col));
+
+			setChunks[i] = sql`${key} = __lib_unnest_input__.${key}`;
+			const val = set[colName];
+			unnestChunks[i] = is(val, Param)
+				? sql`${val}::${sql.raw(col.getSQLType())} as ${key}`
+				: sql`unnest(${val}) as ${key}`;
+		});
+
+		const setSql = sql.join(setChunks, sql.raw(', '));
+		const unnestPart = sql.join(unnestChunks, sql.raw(', '));
+
+		const unnestSql = sql.join([sql.raw(' from ( select '), unnestPart, sql.raw(' ) as __lib_unnest_input__ ')]);
+
+		return sql`${setSql}${unnestSql}`;
+	}
+	
+	buildUpdateQuery({ table, set, isUnnest, where, returning, withList, from, joins }: PgUpdateConfig): SQL {
 		const withSql = this.buildWithCTE(withList);
 
 		const tableName = table[PgTable.Symbol.Name];
@@ -180,8 +209,11 @@ export class PgDialect {
 		const tableSql = sql`${tableSchema ? sql`${sql.identifier(tableSchema)}.` : undefined}${
 			sql.identifier(origTableName)
 		}${alias && sql` ${sql.identifier(alias)}`}`;
-
-		const setSql = this.buildUpdateSet(table, set);
+		let setSql: SQL<unknown>;
+		if (isUnnest)
+			setSql = this.buildUpdateSetUnnest(table, set);
+		else
+			setSql = this.buildUpdateSet(table, set);
 
 		const fromSql = from && sql.join([sql.raw(' from '), this.buildFromTable(from)]);
 

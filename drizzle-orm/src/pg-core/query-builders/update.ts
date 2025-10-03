@@ -48,6 +48,7 @@ import type {
 	SelectedFieldsOrdered,
 	TableLikeHasEmptySelection,
 } from './select.types.ts';
+import { BinaryOperatorUnnest, getUnnestParam, mapUpdateSetAfterUnnest } from '../utils/unnest.ts';
 
 export interface PgUpdateConfig {
 	where?: SQL | undefined;
@@ -58,6 +59,7 @@ export interface PgUpdateConfig {
 	returningFields?: SelectedFields;
 	returning?: SelectedFieldsOrdered;
 	withList?: Subquery[];
+	isUnnest?: boolean;
 }
 
 export type PgUpdateSetSource<TTable extends PgTable> =
@@ -66,6 +68,15 @@ export type PgUpdateSetSource<TTable extends PgTable> =
 			| GetColumnData<TTable['_']['columns'][Key]>
 			| SQL
 			| PgColumn
+			| undefined;
+	}
+	& {};
+
+export type PgUpdateSetWithUnnestSource<TTable extends PgTable> =
+	& {
+		[Key in keyof TTable['$inferInsert']]?:
+			| GetColumnData<TTable['_']['columns'][Key]> | GetColumnData<TTable['_']['columns'][Key]>[]
+			| SQL
 			| undefined;
 	}
 	& {};
@@ -101,12 +112,26 @@ export class PgUpdateBuilder<TTable extends PgTable, TQueryResult extends PgQuer
 			this.withList,
 		).setToken(this.authToken);
 	}
+
+	setAfterUnnest(
+		values: PgUpdateSetWithUnnestSource<TTable>,
+	): PgUpdateWithout<PgUpdateBase<TTable, TQueryResult>, false, 'from'|'leftJoin' | 'rightJoin' | 'innerJoin' | 'fullJoin', true> {
+		return new PgUpdateBase<TTable, TQueryResult, undefined, undefined, undefined, Record<TTable['_']['name'], 'not-null'>, [], false, never, true>(
+			this.table,
+			mapUpdateSetAfterUnnest(this.table, values),
+			this.session,
+			this.dialect,
+			this.withList,
+			true,
+		).setToken(this.authToken);
+	}
 }
 
 export type PgUpdateWithout<
 	T extends AnyPgUpdate,
 	TDynamic extends boolean,
 	K extends keyof T & string,
+	TUnnest extends boolean = false,
 > = TDynamic extends true ? T : Omit<
 	PgUpdateBase<
 		T['_']['table'],
@@ -117,7 +142,8 @@ export type PgUpdateWithout<
 		T['_']['nullabilityMap'],
 		T['_']['joins'],
 		TDynamic,
-		T['_']['excludedMethods'] | K
+		T['_']['excludedMethods'] | K,
+		TUnnest
 	>,
 	T['_']['excludedMethods'] | K
 >;
@@ -140,7 +166,8 @@ export type PgUpdateWithJoins<
 			table: TFrom;
 		}],
 		TDynamic,
-		Exclude<T['_']['excludedMethods'] | 'from', 'leftJoin' | 'rightJoin' | 'innerJoin' | 'fullJoin'>
+		Exclude<T['_']['excludedMethods'] | 'from', 'leftJoin' | 'rightJoin' | 'innerJoin' | 'fullJoin'>,
+		false
 	>,
 	Exclude<T['_']['excludedMethods'] | 'from', 'leftJoin' | 'rightJoin' | 'innerJoin' | 'fullJoin'>
 >;
@@ -302,7 +329,7 @@ export type PgUpdate<
 	TJoins extends Join[] = [],
 > = PgUpdateBase<TTable, TQueryResult, TFrom, TSelectedFields, TReturning, TNullabilityMap, TJoins, true, never>;
 
-export type AnyPgUpdate = PgUpdateBase<any, any, any, any, any, any, any, any, any>;
+export type AnyPgUpdate = PgUpdateBase<any, any, any, any, any, any, any, any, any, any>;
 
 export interface PgUpdateBase<
 	TTable extends PgTable,
@@ -314,6 +341,7 @@ export interface PgUpdateBase<
 	TJoins extends Join[] = [],
 	TDynamic extends boolean = false,
 	TExcludedMethods extends string = never,
+	TUnnest extends boolean = false,
 > extends
 	TypedQueryBuilder<
 		TSelectedFields,
@@ -332,6 +360,7 @@ export interface PgUpdateBase<
 		readonly from: TFrom;
 		readonly selectedFields: TSelectedFields;
 		readonly returning: TReturning;
+		readonly unnest: TUnnest;
 		readonly dynamic: TDynamic;
 		readonly excludedMethods: TExcludedMethods;
 		readonly result: TReturning extends undefined ? PgQueryResultKind<TQueryResult, never> : TReturning[];
@@ -353,6 +382,8 @@ export class PgUpdateBase<
 	TDynamic extends boolean = false,
 	// eslint-disable-next-line @typescript-eslint/no-unused-vars
 	TExcludedMethods extends string = never,
+	// eslint-disable-next-line @typescript-eslint/no-unused-vars
+	TUnnest extends boolean = false,
 > extends QueryPromise<TReturning extends undefined ? PgQueryResultKind<TQueryResult, never> : TReturning[]>
 	implements
 		RunnableQuery<TReturning extends undefined ? PgQueryResultKind<TQueryResult, never> : TReturning[], 'pg'>,
@@ -371,9 +402,10 @@ export class PgUpdateBase<
 		private session: PgSession,
 		private dialect: PgDialect,
 		withList?: Subquery[],
+		isUnnest?:boolean,
 	) {
 		super();
-		this.config = { set, table, withList, joins: [] };
+		this.config = { set, table, withList, joins: [], isUnnest };
 		this.tableName = getTableLikeName(table);
 		this.joinsNotNullableMap = typeof this.tableName === 'string' ? { [this.tableName]: true } : {};
 	}
@@ -505,8 +537,19 @@ export class PgUpdateBase<
 	 *   .where(or(eq(cars.color, 'green'), eq(cars.color, 'blue')));
 	 * ```
 	 */
-	where(where: SQL | undefined): PgUpdateWithout<this, TDynamic, 'where'> {
-		this.config.where = where;
+	where(where: TUnnest extends true
+		?  ReturnType<BinaryOperatorUnnest>
+		: SQL | undefined
+	): PgUpdateWithout<this, TDynamic, 'where'>
+	{
+		if (Array.isArray(where)) {
+			where[1].forEach(({ col, val }) => {
+				this.config.set[col.name] = getUnnestParam(col, val);
+			});
+			this.config.where = where[0];
+		} else {
+			this.config.where = where;
+		}
 		return this as any;
 	}
 

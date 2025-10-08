@@ -41,6 +41,7 @@ import {
 import { ViewBaseConfig } from '~/view-common.ts';
 import type { PgColumn } from '../columns/common.ts';
 import { extractUsedTable } from '../utils.ts';
+import { BinaryOperatorUnnest, getUnnestParam, mapUpdateSetAfterUnnest } from '../utils/unnest.ts';
 import type { PgViewBase } from '../view-base.ts';
 import type {
 	PgSelectJoinConfig,
@@ -48,7 +49,6 @@ import type {
 	SelectedFieldsOrdered,
 	TableLikeHasEmptySelection,
 } from './select.types.ts';
-import { BinaryOperatorUnnest, getUnnestParam, mapUpdateSetAfterUnnest } from '../utils/unnest.ts';
 
 export interface PgUpdateConfig {
 	where?: SQL | undefined;
@@ -75,7 +75,8 @@ export type PgUpdateSetSource<TTable extends PgTable> =
 export type PgUpdateSetWithUnnestSource<TTable extends PgTable> =
 	& {
 		[Key in keyof TTable['$inferInsert']]?:
-			| GetColumnData<TTable['_']['columns'][Key]> | GetColumnData<TTable['_']['columns'][Key]>[]
+			| GetColumnData<TTable['_']['columns'][Key]>
+			| GetColumnData<TTable['_']['columns'][Key]>[]
 			| SQL
 			| undefined;
 	}
@@ -115,8 +116,24 @@ export class PgUpdateBuilder<TTable extends PgTable, TQueryResult extends PgQuer
 
 	setAfterUnnest(
 		values: PgUpdateSetWithUnnestSource<TTable>,
-	): PgUpdateWithout<PgUpdateBase<TTable, TQueryResult>, false, 'from'|'leftJoin' | 'rightJoin' | 'innerJoin' | 'fullJoin', true> {
-		return new PgUpdateBase<TTable, TQueryResult, undefined, undefined, undefined, Record<TTable['_']['name'], 'not-null'>, [], false, never, true>(
+	): PgUpdateWithout<
+		PgUpdateBase<TTable, TQueryResult>,
+		false,
+		'from' | 'leftJoin' | 'rightJoin' | 'innerJoin' | 'fullJoin',
+		true
+	> {
+		return new PgUpdateBase<
+			TTable,
+			TQueryResult,
+			undefined,
+			undefined,
+			undefined,
+			Record<TTable['_']['name'], 'not-null'>,
+			[],
+			false,
+			never,
+			true
+		>(
 			this.table,
 			mapUpdateSetAfterUnnest(this.table, values),
 			this.session,
@@ -402,7 +419,7 @@ export class PgUpdateBase<
 		private session: PgSession,
 		private dialect: PgDialect,
 		withList?: Subquery[],
-		isUnnest?:boolean,
+		isUnnest?: boolean,
 	) {
 		super();
 		this.config = { set, table, withList, joins: [], isUnnest };
@@ -537,11 +554,10 @@ export class PgUpdateBase<
 	 *   .where(or(eq(cars.color, 'green'), eq(cars.color, 'blue')));
 	 * ```
 	 */
-	where(where: TUnnest extends true
-		?  ReturnType<BinaryOperatorUnnest>
-		: SQL | undefined
-	): PgUpdateWithout<this, TDynamic, 'where'>
-	{
+	where(
+		where: TUnnest extends true ? ReturnType<BinaryOperatorUnnest>
+			: SQL | undefined,
+	): PgUpdateWithout<this, TDynamic, 'where'> {
 		if (Array.isArray(where)) {
 			where[1].forEach(({ col, val }) => {
 				this.config.set[col.name] = getUnnestParam(col, val);
